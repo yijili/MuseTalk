@@ -1,3 +1,4 @@
+# file:e:\AI\muse\MuseTalk-main\api.py
 import os
 import sys
 import time
@@ -126,6 +127,11 @@ def load_models():
     """加载所有模型"""
     global vae, unet, pe, audio_processor, whisper, device, timesteps
     
+    # 如果模型已经加载，直接返回
+    if vae is not None and unet is not None and pe is not None and audio_processor is not None and whisper is not None:
+        logger.info("模型已加载，跳过重复加载")
+        return
+    
     # 使用 GPU 设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -162,12 +168,8 @@ atexit.register(cleanup_models)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时的初始化代码
-    try:
-        load_models()
-    except Exception as e:
-        logger.error(f"模型加载失败: {str(e)}")
-        raise
+    # 启动时不加载模型
+    logger.info("应用启动，模型将在需要时加载")
     yield
     # 关闭时的清理代码
     logger.info("正在关闭应用...")
@@ -240,8 +242,7 @@ def debug_inpainting_api(
         logger.info(f"开始执行 debug_inpainting，视频路径: {video_path}")
         
         # 确保模型已加载
-        if vae is None or unet is None or pe is None:
-            raise HTTPException(status_code=500, detail="模型未加载")
+        load_models()
         
         # 设置参数
         result_dir = output_path if output_path else './results/debug'
@@ -366,8 +367,7 @@ def inference_api(
         logger.info(f"开始执行 inference，任务ID: {task_id}，音频路径: {audio_path}，视频路径: {video_path}")
         
         # 确保模型已加载
-        if vae is None or unet is None or pe is None or audio_processor is None or whisper is None:
-            raise HTTPException(status_code=500, detail="模型未加载")
+        load_models()
         
         # 设置参数
         result_dir = output_path if output_path else './results/output'
@@ -861,6 +861,9 @@ async def debug_inpainting_endpoint(request: DebugInpaintingRequest):
     except Exception as e:
         logger.error(f"处理 debug_inpainting 请求时出错: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # 完成后清理模型以释放内存
+        cleanup_models()
 
 @app.post("/inference", response_model=InferenceResponse, summary="执行推理生成视频")
 async def inference_endpoint(request: InferenceRequest):
@@ -957,19 +960,28 @@ async def get_task_result(request: TaskResultRequest):
         task = active_tasks[task_id]
         if task.status == "completed":
             logger.info(f"任务 {task_id} 已完成，返回结果")
-            return {
+            result = {
                 "task_id": task_id,
                 "status": task.status,
                 "message": task.message,
                 "result": task.result
             }
+            # 清理模型以释放内存
+            cleanup_models()
+            return result
         elif task.status == "failed":
             logger.info(f"任务 {task_id} 执行失败")
+            # 清理模型以释放内存
+            cleanup_models()
             raise HTTPException(status_code=500, detail=task.message)
         elif task.status == "cancelled":
             logger.info(f"任务 {task_id} 已被取消")
+            # 清理模型以释放内存
+            cleanup_models()
             raise HTTPException(status_code=499, detail="任务已被取消")  # 499表示客户端关闭请求
         else:
+            # 清理模型以释放内存
+            cleanup_models()
             raise HTTPException(status_code=500, detail="未知任务状态")
 
 @app.post("/cancel_task", summary="取消任务")
@@ -1006,6 +1018,8 @@ async def cancel_task(request: CancelTaskRequest):
         await asyncio.sleep(0.5)
     
     logger.info(f"任务 {task_id} 取消完成")
+    # 清理模型以释放内存
+    cleanup_models()
     return {"message": "任务取消完成"}
 
 @app.get("/", summary="API 根路径")
@@ -1064,7 +1078,7 @@ if __name__ == "__main__":
         logger.setLevel(logging.DEBUG)
         logger.debug("调试模式已启用")
     
-    logger.info(f"启动 MuseTalk API 服务，当前版本1.0.29，主机: {args.host}，端口: {args.port}")
+    logger.info(f"启动 MuseTalk API 服务，当前版本1.0.30，主机: {args.host}，端口: {args.port}")
     
     # 不使用 reload 参数，避免重复导入
     uvicorn.run("api:app", host=args.host, port=args.port, reload=False)
